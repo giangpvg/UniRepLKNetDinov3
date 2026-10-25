@@ -1,0 +1,14 @@
+# Core Deep Learning Framework
+torch>=2.0.0
+torchvision>=0.15.0
+
+# DINOv3 Dependencies
+omegaconf>=2.3.0
+ftfy
+regex
+termcolor
+scikit-learn
+
+# Optional / Downstream tools
+# mmsegmentation>=1.0.0  # Uncomment if using MMSegmentation
+# mmcv>=2.0.0            # Uncomment if using MMCV

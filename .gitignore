@@ -1,0 +1,7 @@
+Ca2_PhamVanGiang_2351260649.pdf
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pth
+*.pt
