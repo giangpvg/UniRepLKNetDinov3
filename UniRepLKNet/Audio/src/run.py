@@ -8,6 +8,8 @@ import torch
 from torch.utils.data import WeightedRandomSampler
 basepath = os.path.dirname(os.path.dirname(sys.path[0]))
 sys.path.append(basepath)
+# repo root: unireplknet_backbone_dinov3.py and audio_loss.py
+sys.path.append(os.path.dirname(basepath))
 import dataloader
 import models
 import numpy as np
@@ -21,7 +23,7 @@ parser.add_argument("--data-val", type=str, default='', help="validation data js
 parser.add_argument("--data-eval", type=str, default='', help="evaluation data json")
 parser.add_argument("--label-csv", type=str, default='', help="csv with class labels")
 parser.add_argument("--n_class", type=int, default=527, help="number of classes")
-parser.add_argument("--model", type=str, default='ast', help="the model used")
+parser.add_argument("--model", type=str, default='ast', choices=["ast", "unireplknet_dinov3"], help="the model used")
 parser.add_argument("--dataset", type=str, default="audioset", help="the dataset used")
 
 parser.add_argument("--exp-dir", type=str, default="", help="directory to dump experiments")
@@ -52,7 +54,18 @@ parser.add_argument("--audio_length", type=int, default=1024, help="the dataset 
 parser.add_argument('--noise', help='if augment noise', type=ast.literal_eval, default='False')
 
 parser.add_argument("--metrics", type=str, default=None, help="evaluation metrics", choices=["acc", "mAP"])
-parser.add_argument("--loss", type=str, default=None, help="loss function", choices=["BCE", "CE"])
+parser.add_argument("--loss", type=str, default=None, help="loss function", choices=["BCE", "CE", "AudioDINO"])
+# unireplknet_dinov3 backbone
+parser.add_argument("--backbone_arch", type=str, default='dinov3_vits16', help="DINOv3 hub entry used as the backbone")
+parser.add_argument("--backbone_ckpt", type=str, default=None, help="path/URL of DINOv3 weights, None = hub default")
+parser.add_argument("--drop_path_rate", type=float, default=0., help="stochastic depth rate of the backbone")
+# AudioDINO loss (only used with --loss AudioDINO)
+parser.add_argument("--gamma_pos", type=float, default=1., help="focal focusing of the positives")
+parser.add_argument("--gamma_neg", type=float, default=3., help="focal focusing of the negatives")
+parser.add_argument("--margin", type=float, default=0.05, help="probability margin below which negatives are ignored")
+parser.add_argument("--smoothing", type=float, default=0.05, help="label smoothing")
+parser.add_argument("--koleo_weight", type=float, default=0.1, help="weight of the KoLeo term, 0 disables it")
+parser.add_argument("--gram_weight", type=float, default=1., help="weight of the Gram anchoring term, 0 disables it (and the frozen teacher)")
 parser.add_argument('--warmup', help='if warmup the learning rate', type=ast.literal_eval, default='False')
 parser.add_argument("--lrscheduler_start", type=int, default=2, help="which epoch to start reducing the learning rate")
 parser.add_argument("--lrscheduler_step", type=int, default=1, help="how many epochs as step to reduce the learning rate")
@@ -90,9 +103,13 @@ parser.add_argument('--wa_end', type=int, default=5, help="which epoch to end we
 
 args = parser.parse_args()
 
+if args.model == 'unireplknet_dinov3':
+    assert args.loss == 'AudioDINO', 'unireplknet_dinov3 returns a dict in training, use it with --loss AudioDINO'
+    assert args.audio_length % 16 == 0, 'audio_length must be a multiple of 16 (DINOv3 patch size)'
+
 # transformer based model
-if args.model == 'ast':
-    print('now train a audio spectrogram transformer model')
+if args.model in ('ast', 'unireplknet_dinov3'):
+    print('now train a {:s} model'.format(args.model))
 
     # 11/30/22: I decouple the dataset and the following hyper-parameters to make it easier to adapt to new datasets
     # dataset spectrogram mean and std, used to normalize the input
@@ -125,7 +142,14 @@ if args.model == 'ast':
 
     audio_model = models.ASTModel(label_dim=args.n_class, fstride=args.fstride, tstride=args.tstride, input_fdim=128,
                                   input_tdim=args.audio_length, imagenet_pretrain=args.imagenet_pretrain,
-                                  audioset_pretrain=args.audioset_pretrain, model_size='base384')
+                                  audioset_pretrain=args.audioset_pretrain, model_size='base384') \
+        if args.model == 'ast' else None
+
+if args.model == 'unireplknet_dinov3':
+    from models.dinov3_audio import AudioDINOv3
+    audio_model = AudioDINOv3(num_classes=args.n_class, backbone_arch=args.backbone_arch,
+                              backbone_ckpt=args.backbone_ckpt, drop_path_rate=args.drop_path_rate,
+                              use_teacher=args.gram_weight > 0)
 
 print("\nCreating experiment directory: %s" % args.exp_dir)
 os.makedirs("%s/models" % args.exp_dir)

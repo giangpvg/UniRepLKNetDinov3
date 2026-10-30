@@ -52,6 +52,12 @@ def train(audio_model, train_loader, test_loader, args):
         loss_fn = nn.BCEWithLogitsLoss()
     elif args.loss == 'CE':
         loss_fn = nn.CrossEntropyLoss()
+    elif args.loss == 'AudioDINO':
+        from audio_loss import AudioDINOLoss
+        loss_fn = AudioDINOLoss(gamma_pos=args.gamma_pos, gamma_neg=args.gamma_neg, margin=args.margin,
+                                smoothing=args.smoothing, koleo_weight=args.koleo_weight,
+                                gram_weight=args.gram_weight).to(device)
+    part_meters = {}
     warmup = args.warmup
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, list(range(args.lrscheduler_start, 1000, args.lrscheduler_step)),gamma=args.lrscheduler_decay)
     args.loss_fn = loss_fn
@@ -119,7 +125,11 @@ def train(audio_model, train_loader, test_loader, args):
 
             # with autocast():
             audio_output = audio_model(audio_input)
-            if isinstance(loss_fn, torch.nn.CrossEntropyLoss):
+            if args.loss == 'AudioDINO':
+                loss, parts = loss_fn(audio_output, labels, audio_output.get('teacher_tokens'))
+                for k, v in parts.items():
+                    part_meters.setdefault(k, AverageMeter()).update(v.item(), B)
+            elif isinstance(loss_fn, torch.nn.CrossEntropyLoss):
                 loss = loss_fn(audio_output, torch.argmax(labels.long(), axis=1))
             else:
                 loss = loss_fn(audio_output, labels)
@@ -154,6 +164,8 @@ def train(audio_model, train_loader, test_loader, args):
                   'Train Loss {loss_meter.avg:.4f}\t'.format(
                    epoch, i, len(train_loader), per_sample_time=per_sample_time, per_sample_data_time=per_sample_data_time,
                       per_sample_dnn_time=per_sample_dnn_time, loss_meter=loss_meter), flush=True)
+                if part_meters:
+                    print('Loss parts: ' + ' '.join('{:s} {:.4f}'.format(k, m.avg) for k, m in part_meters.items()), flush=True)
                 if np.isnan(loss_meter.avg):
                     print("training diverged...")
                     return
@@ -238,6 +250,8 @@ def train(audio_model, train_loader, test_loader, args):
         per_sample_data_time.reset()
         loss_meter.reset()
         per_sample_dnn_time.reset()
+        for m in part_meters.values():
+            m.reset()
 
     # if args.dataset == 'audioset':
     #     if len(train_loader.dataset) > 2e5:
@@ -282,8 +296,8 @@ def validate(audio_model, val_loader, args, epoch):
             audio_input = audio_input.to(device)
 
             # compute output
-            audio_output = audio_model(audio_input)
-            audio_output = torch.sigmoid(audio_output)
+            logits = audio_model(audio_input)
+            audio_output = torch.sigmoid(logits)
             predictions = audio_output.to('cpu').detach()
 
             A_predictions.append(predictions)
@@ -291,7 +305,9 @@ def validate(audio_model, val_loader, args, epoch):
 
             # compute the loss
             labels = labels.to(device)
-            if isinstance(args.loss_fn, torch.nn.CrossEntropyLoss):
+            if args.loss == 'AudioDINO':
+                loss = args.loss_fn.cls_loss(logits, labels)
+            elif isinstance(args.loss_fn, torch.nn.CrossEntropyLoss):
                 loss = args.loss_fn(audio_output, torch.argmax(labels.long(), axis=1))
             else:
                 loss = args.loss_fn(audio_output, labels)

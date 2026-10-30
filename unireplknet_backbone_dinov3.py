@@ -57,8 +57,11 @@ class DINOv3Backbone(nn.Module):
             self.vit.patch_embed.proj = new
             self.vit.patch_embed.in_chans = in_chans
 
+    def forward_tokens(self, x):
+        return self.vit.forward_features(x)['x_norm_patchtokens']
+
     def forward_global(self, x):
-        return self.vit.forward_features(x)['x_norm_patchtokens'].mean(dim=1)
+        return self.forward_tokens(x).mean(dim=1)
 
     def forward(self, x):
         f1, f2, f3, f4 = self.vit.get_intermediate_layers(x, n=self.out_indices, reshape=True)
@@ -183,6 +186,14 @@ class UniRepLKNet(nn.Module):
             nn.init.trunc_normal_(m.weight, std=.02)
             if hasattr(m, 'bias') and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
+
+    def forward_with_aux(self, x):
+        """Same as forward() in 'logits' mode, but also returns what the DINOv3 auxiliary losses need:
+        dict(logits, embed (N, embed_dim) normed global feature, tokens (N, L, embed_dim) final patch tokens)."""
+        assert self.output_mode == 'logits'
+        tokens = self.backbone.forward_tokens(x)
+        embed = self.norm(tokens.mean(dim=1))
+        return dict(logits=self.head(embed), embed=embed, tokens=tokens)
 
     def forward(self, x):
         if self.output_mode == 'logits':
